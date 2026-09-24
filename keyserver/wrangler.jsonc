@@ -1,0 +1,22 @@
+{
+	"name": "np-keyserver",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-30",
+	"compatibility_flags": ["nodejs_compat"],
+	"routes": [{ "pattern": "np.tiago.zip", "custom_domain": true }],
+	"observability": { "enabled": true },
+	"ratelimits": [
+		{
+			"name": "PUT_LIMITER",
+			"namespace_id": "4001",
+			"simple": { "limit": 5, "period": 10 }
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "np-keyserver",
+			"database_id": "4f0f6d93-8f85-4d8d-bfd2-e828982dab1d"
+		}
+	]
+}
