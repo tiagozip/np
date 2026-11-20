@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import {
 	chmodSync,
 	existsSync,
@@ -341,6 +342,8 @@ const MAX_KEY_BODY = 1 << 20;
 const FETCH_TIMEOUT = 10_000;
 const PRIVATE_HOST =
 	/^(localhost|127\.|0\.|10\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|\[?::1\]?)/i;
+const PRIVATE_ADDR =
+	/^(127\.|0\.|10\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|::1?$|f[cd]|fe[89ab]|::ffff:)/i;
 
 async function readCapped(res: Response, url: string) {
 	const declared = Number(res.headers.get("content-length") ?? 0);
@@ -376,7 +379,14 @@ export async function fetchKey(url: string, source: string) {
 		if (!res || res.status < 300 || res.status >= 400 || !next) break;
 		at = new URL(next, at).toString();
 		const host = new URL(at).hostname;
-		if (PRIVATE_HOST.test(host) && !PRIVATE_HOST.test(new URL(url).hostname))
+		const resolved = await lookup(host.replace(/^\[|\]$/g, ""), {
+			all: true,
+		}).catch(() => []);
+		if (
+			(PRIVATE_HOST.test(host) ||
+				resolved.some((a) => PRIVATE_ADDR.test(a.address))) &&
+			!PRIVATE_HOST.test(new URL(url).hostname)
+		)
 			throw new Error(
 				`${source} redirected to ${host}, which is on your own network`,
 			);

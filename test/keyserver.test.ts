@@ -38,6 +38,7 @@ const env = {
 		},
 	},
 	PUT_LIMITER: { limit: async () => ({ success: allowed }) },
+	GET_LIMITER: { limit: async () => ({ success: true }) },
 } as never;
 
 const call = (method: string, path: string, body?: string, ip = "10.0.0.1") =>

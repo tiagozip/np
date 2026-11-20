@@ -10,6 +10,11 @@
 			"name": "PUT_LIMITER",
 			"namespace_id": "4001",
 			"simple": { "limit": 5, "period": 10 }
+		},
+		{
+			"name": "GET_LIMITER",
+			"namespace_id": "9201",
+			"simple": { "limit": 60, "period": 10 }
 		}
 	],
 	"d1_databases": [

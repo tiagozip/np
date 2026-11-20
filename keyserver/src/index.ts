@@ -1,4 +1,5 @@
 import {
+	ARMOR_END,
 	armorAlias,
 	armorBundle,
 	armorRevocation,
@@ -15,6 +16,7 @@ const USERNAME_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
 type Env = {
 	DB: D1Database;
 	PUT_LIMITER: { limit(opts: { key: string }): Promise<{ success: boolean }> };
+	GET_LIMITER: { limit(opts: { key: string }): Promise<{ success: boolean }> };
 };
 
 const text = (
@@ -71,12 +73,22 @@ async function revocationFor(env: Env, key: Uint8Array) {
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
 		const path = new URL(req.url).pathname;
+		const client = (() => {
+			const ip = req.headers.get("cf-connecting-ip") ?? "unknown";
+			if (!ip.includes(":")) return ip;
+			const [head = "", tail = ""] = ip.split("::");
+			const h = head ? head.split(":") : [];
+			const t = tail ? tail.split(":") : [];
+			const groups = ip.includes("::")
+				? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t]
+				: h;
+			return `${groups
+				.slice(0, 4)
+				.map((g) => g.padStart(4, "0"))
+				.join(":")}::/64`;
+		})();
 		const limited = async () =>
-			!(
-				await env.PUT_LIMITER.limit({
-					key: req.headers.get("cf-connecting-ip") ?? "unknown",
-				})
-			).success;
+			!(await env.PUT_LIMITER.limit({ key: client })).success;
 
 		if (req.method === "PUT" && path === "/revoke") {
 			if (await limited())
@@ -85,7 +97,7 @@ export default {
 			if (body.length > 16384) return text("too big", 413);
 			const [keyStr, sigB64, ...rest] = body.split("\n");
 			const reason = rest.join(" ");
-			if (reason !== cleanReason(reason))
+			if (reason !== cleanReason(reason) || reason.includes(ARMOR_END))
 				return text("reason must be plain text of at most 200 characters", 400);
 			let key: Uint8Array;
 			let sig: Uint8Array;
@@ -139,24 +151,27 @@ export default {
 					return text("name taken", 409);
 			}
 			if (!existing) {
-				const ip = req.headers.get("cf-connecting-ip") ?? "unknown";
 				const day = Math.floor(Date.now() / 86400000);
 				const taken = await env.DB.prepare(
 					"INSERT INTO claim_rate (ip, day, count) VALUES (?, ?, 1) ON CONFLICT(ip, day) DO UPDATE SET count = count + 1 WHERE count < 5 RETURNING count",
 				)
-					.bind(ip, day)
+					.bind(client, day)
 					.first<{ count: number }>();
 				if (!taken) return text("too many new names today, try tomorrow", 429);
 			}
-			await env.DB.prepare(
-				"INSERT INTO names (name, key, sig) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET key = excluded.key, sig = excluded.sig",
+			const written = await env.DB.prepare(
+				"INSERT INTO names (name, key, sig) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET key = excluded.key, sig = excluded.sig WHERE names.key IN (?, ?) RETURNING name",
 			)
-				.bind(name, held, b64(sig))
-				.run();
+				.bind(name, held, b64(sig), existing?.key ?? held, held)
+				.first();
+			if (!written) return text("name taken", 409);
 			return text(fingerprint(key));
 		}
 
 		if (req.method === "GET" && path.startsWith("/u/")) {
+			const { success } = await env.GET_LIMITER.limit({ key: client });
+			if (!success)
+				return text("too many requests", 429, { "retry-after": "10" });
 			const name = path.slice(3).toLowerCase();
 			if (!USERNAME_RE.test(name)) return text("invalid username", 400);
 			const row = await env.DB.prepare(
