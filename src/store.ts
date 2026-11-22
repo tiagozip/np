@@ -8,8 +8,12 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import http from "node:http";
+import https from "node:https";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { concatBytes } from "@noble/hashes/utils.js";
 import { secrets } from "bun";
 import {
@@ -367,29 +371,69 @@ async function readCapped(res: Response, url: string) {
 }
 
 export async function fetchKey(url: string, source: string) {
+	const guard = !PRIVATE_HOST.test(new URL(url).hostname);
 	let at = url;
 	let res: Response | null = null;
 	for (let hop = 0; hop < 4; hop++) {
-		res = await fetch(at, {
-			redirect: "manual",
-			signal: AbortSignal.timeout(FETCH_TIMEOUT),
-			headers: { accept: "text/plain, */*" },
-		}).catch(() => null);
+		const target = new URL(at);
+		const host = target.hostname.replace(/^\[|\]$/g, "");
+		const checked = guard && hop > 0;
+		const blocked = new Error(
+			`${source} redirected to ${host}, which is on your own network`,
+		);
+		if (!/^https?:$/.test(target.protocol)) {
+			res = null;
+			break;
+		}
+		let refused = false;
+		if (
+			checked &&
+			(PRIVATE_HOST.test(target.hostname) ||
+				(isIP(host) && PRIVATE_ADDR.test(host)))
+		)
+			throw blocked;
+		res = await new Promise<Response | null>((resolve, reject) => {
+			const req = (target.protocol === "https:" ? https : http).request(
+				target,
+				{
+					headers: { accept: "text/plain, */*" },
+					signal: AbortSignal.timeout(FETCH_TIMEOUT),
+					lookup: (name, opts, cb) =>
+						lookup(name, { all: true })
+							.then((addrs) => {
+								if (!addrs.length) throw new Error(`${name} has no address`);
+								if (
+									checked &&
+									addrs.some((a) => PRIVATE_ADDR.test(a.address))
+								) {
+									refused = true;
+									throw blocked;
+								}
+								if (opts.all) cb(null, addrs);
+								else cb(null, addrs[0].address, addrs[0].family);
+							})
+							.catch((e) => cb(e, "", 0)),
+				},
+				(r) => {
+					const status = r.statusCode ?? 0;
+					const empty = status < 200 || [204, 205, 304].includes(status);
+					if (empty) r.resume();
+					resolve(
+						new Response(empty ? null : (Readable.toWeb(r) as ReadableStream), {
+							status,
+							headers: Object.entries(r.headers).flatMap(([k, v]) =>
+								v === undefined ? [] : [[k, [v].flat().join(", ")]],
+							) as [string, string][],
+						}),
+					);
+				},
+			);
+			req.on("error", () => (refused ? reject(blocked) : resolve(null)));
+			req.end();
+		});
 		const next = res?.headers.get("location");
 		if (!res || res.status < 300 || res.status >= 400 || !next) break;
 		at = new URL(next, at).toString();
-		const host = new URL(at).hostname;
-		const resolved = await lookup(host.replace(/^\[|\]$/g, ""), {
-			all: true,
-		}).catch(() => []);
-		if (
-			(PRIVATE_HOST.test(host) ||
-				resolved.some((a) => PRIVATE_ADDR.test(a.address))) &&
-			!PRIVATE_HOST.test(new URL(url).hostname)
-		)
-			throw new Error(
-				`${source} redirected to ${host}, which is on your own network`,
-			);
 	}
 	if (!res?.ok)
 		throw new Error(
